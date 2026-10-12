@@ -11,9 +11,16 @@ from src.dashboard_data import (
     DashboardPaths,
     aspect_frequency,
     aspect_sentiment_counts,
+    aspect_sentiment_matrix,
+    build_insight_report,
+    complaint_prioritization,
+    data_quality_summary,
+    findings_csv_bytes,
     filter_findings,
+    insight_report_markdown,
     load_dashboard_data,
     pipeline_summary,
+    representative_evidence,
     review_count,
     sentiment_distribution,
 )
@@ -78,6 +85,7 @@ def test_valid_artifacts_load_with_stage4_contract(tmp_path: Path) -> None:
     assert data.evaluation_report["quality_population_reviews"] == 7
     assert len(data.evaluation_errors) == 1
     assert data.issues == []
+    assert pipeline_summary(data)["recorded_attempts"] == 5
 
 
 def test_missing_files_return_empty_artifacts_with_actionable_state(tmp_path: Path) -> None:
@@ -195,3 +203,96 @@ def test_missing_evaluation_artifacts_are_unavailable_not_fabricated(tmp_path: P
     assert data.evaluation_errors.empty
     assert not data.available["evaluation"]
     assert not data.available["evaluation_errors"]
+
+
+def priority_findings() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"review_id": "r1", "aspect": "Scent", "sentiment": "negative", "supporting_quote": "bad scent", "review_text": "The bad scent is overwhelming."},
+            {"review_id": "r1", "aspect": "Scent", "sentiment": "negative", "supporting_quote": "scent is overwhelming", "review_text": "The bad scent is overwhelming."},
+            {"review_id": "r2", "aspect": "Scent", "sentiment": "negative", "supporting_quote": "scent burns", "review_text": "The scent burns."},
+            {"review_id": "r3", "aspect": "Scent", "sentiment": "positive", "supporting_quote": "nice scent", "review_text": "I like the nice scent."},
+            {"review_id": "r4", "aspect": "Texture", "sentiment": "negative", "supporting_quote": "rough texture", "review_text": "The rough texture bothers me."},
+        ]
+    )
+
+
+def test_aspect_matrix_uses_unique_review_sentiment_pairs() -> None:
+    matrix = aspect_sentiment_matrix(priority_findings()).set_index("aspect")
+    scent = matrix.loc["Scent"]
+    assert scent["finding_rows"] == 4
+    assert scent["review_count"] == 3
+    assert scent["sentiment_pair_count"] == 3
+    assert scent["negative_review_count"] == 2
+    assert scent["positive_proportion"] == pytest.approx(1 / 3)
+    assert scent["negative_proportion"] == pytest.approx(2 / 3)
+
+
+def test_complaint_priority_is_weighted_transparent_and_unique_review_based() -> None:
+    priorities = complaint_prioritization(priority_findings(), frequency_weight=60, negative_share_weight=40)
+    assert priorities.iloc[0]["aspect"] == "Scent"
+    assert priorities.iloc[0]["negative_review_count"] == 2
+    assert priorities.iloc[0]["priority_score"] == pytest.approx(100 * (0.6 + 0.4 * (2 / 3)))
+    assert not priorities["severity_available"].any()
+    with pytest.raises(ValueError, match="At least one"):
+        complaint_prioritization(priority_findings(), frequency_weight=0, negative_share_weight=0)
+
+
+def test_representative_evidence_and_insight_report_keep_claim_types_separate() -> None:
+    findings = priority_findings()
+    evidence = representative_evidence(findings)
+    scent_negative = evidence.loc[evidence["aspect"].eq("Scent") & evidence["sentiment"].eq("negative")].iloc[0]
+    assert scent_negative["review_id"] == "r1"
+    assert scent_negative["supporting_quote"] == "bad scent"
+    assert scent_negative["supporting_quote"] in scent_negative["review_text"]
+
+    report = build_insight_report(complaint_prioritization(findings))
+    markdown = insight_report_markdown(report, evidence)
+    assert "## Observed facts" in markdown
+    assert "## Generated interpretations" in markdown
+    assert "## Proposed recommendations" in markdown
+    assert "not a causal finding" in markdown
+    assert 'Scent (negative), review r1: "bad scent"' in markdown
+
+
+def test_insight_report_does_not_infer_a_complaint_without_negative_evidence() -> None:
+    findings = pd.DataFrame(
+        [{"review_id": "r1", "aspect": "Scent", "sentiment": "positive", "supporting_quote": "nice scent"}]
+    )
+    report = build_insight_report(complaint_prioritization(findings))
+    assert report["proposed_recommendations"] == []
+    assert "No negative aspect findings" in report["observed_facts"][0]
+
+
+def test_filtered_findings_export_is_valid_utf8_csv() -> None:
+    findings = priority_findings().iloc[:1]
+    payload = findings_csv_bytes(findings)
+    exported = pd.read_csv(pd.io.common.BytesIO(payload))
+    assert exported.loc[0, "review_id"] == "r1"
+    assert exported.loc[0, "supporting_quote"] == "bad scent"
+
+
+def test_data_quality_reports_invalid_quotes_orphan_ids_and_count_mismatches(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    write_csv(paths.reviews, [{"review_id": "r1", "text": "The scent is nice."}])
+    write_csv(
+        paths.results,
+        [
+            {"review_id": "r1", "aspect": "Scent", "sentiment": "positive", "supporting_quote": "not exact"},
+            {"review_id": "outside", "aspect": "Texture", "sentiment": "negative", "supporting_quote": "rough"},
+        ],
+    )
+    write_csv(paths.checkpoints, [
+        {"review_id": "r1", "status": "completed", "attempt_count": 1, "aspect_count": 2},
+        {"review_id": "outside", "status": "completed", "attempt_count": 1, "aspect_count": 1},
+    ])
+    data = load_dashboard_data(paths)
+    quality = data_quality_summary(data)
+    assert data.results.empty
+    assert len(data.invalid_results) == 2
+    assert quality["invalid_exact_quotes"] == 1
+    assert quality["validated_severity_available"] is False
+    assert quality["checkpoint_result_mismatches"] == [
+        {"review_id": "r1", "checkpoint_aspect_count": 2, "result_rows": 0}
+    ]
+    assert any("outside the source sample" in issue for issue in data.issues)
