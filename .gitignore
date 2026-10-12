@@ -3,12 +3,16 @@
 /data/raw/*.parquet.*
 /data/raw/*.jsonl
 /data/raw/raw_meta_All_Beauty/
+/data/processed/
+/data/evaluation/predictions/
+/data/evaluation/reports/
 
 # Python caches and local environment
 __pycache__/
 *.pyc
 .pytest_cache/
 .env
+.streamlit/secrets.toml
 
 # Optional: keep sample CSV tracked if desired; the full dataset is intentionally ignored.
 # data/raw/all_beauty_sample_500.csv

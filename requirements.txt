@@ -6,3 +6,4 @@ pytest
 python-dotenv
 langchain-core
 langchain-google-genai
+streamlit>=1.65,<2

@@ -193,6 +193,52 @@ Offline tests use synthetic fixtures only and make no Gemini calls. Final verifi
 
 Current status: 50 source reviews and an empty annotation template are prepared; all 50 labels remain unannotated; no corresponding real model predictions exist; no Gemini calls have been made for Stage 5. Therefore there are no actual model quality metrics to report. The 50-review sample is small, single-annotator agreement is not measured, and no claims about generalization or root causes are made. No Stage 6 dashboard work is included.
 
+## Stage 6: dashboard and release readiness
+
+The repository now includes a read-only Streamlit dashboard. Its entry point is [app.py](app.py); presentation code is in [src/dashboard_ui.py](src/dashboard_ui.py), and artifact loading, validation, filtering, aggregation, and operational summaries are in [src/dashboard_data.py](src/dashboard_data.py). It reuses the Stage 2 taxonomy and consumes the Stage 4 CSV contracts and Stage 5 JSON/CSV report format. Opening the dashboard does not call Gemini or load `.env`.
+
+### Dashboard features
+
+- **Overview:** source sample size, distinct attempted/successful/failed review counts when checkpoints exist, aspect finding-row count, checkpoint progress, aspect frequency, sentiment distribution, and aspect-by-sentiment counts. Review totals come from unique review IDs; multiple aspects for one review do not inflate review counts.
+- **Explore findings:** searchable finding table with review ID, source text when available, product ASIN, rating, extraction status, canonical aspect/sentiment, and the corresponding supporting quote. Aspect, sentiment, product ASIN, rating, status, and text/quote filters combine conjunctively. The source has no category field, so no category filter is shown.
+- **Evaluation and errors:** displays Stage 5 metrics and error examples only when their report artifacts exist. The panel distinguishes the manually annotated quality subset from pipeline-wide extraction counts and warns if a report is marked synthetic.
+- **Data status:** lists resolved artifact paths, loading issues, and invalid result rows. Missing outputs produce explicit unavailable/empty states; unknown labels are excluded from charts and shown as invalid rows rather than silently remapped.
+
+Data paths are resolved relative to the repository, not the shell's current directory. Generated `data/processed`, `data/evaluation/predictions`, `data/evaluation/reports`, `.env`, and Streamlit secrets are excluded by [.gitignore](.gitignore). The loader does not retain `user_id` or image fields from the source sample. Streamlit-native charts are used; no additional chart library is required.
+
+### Installation and configuration
+
+Use the repository's existing dependency file:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+Launch the app locally from any working directory by pointing Streamlit at the repository's `app.py`:
+
+`streamlit run app.py`
+
+The dashboard itself needs no API key. Gemini credentials are required only for extraction commands. [.env.example](.env.example) contains placeholders for `GEMINI_API_KEY` and `MODEL_NAME=gemini-3.8-flash`; copy it to `.env` and replace the placeholder only when running extraction. Never commit `.env` or Streamlit secrets.
+
+### Artifact workflow
+
+- The tracked 500-review source sample and 50-review annotation files are already present in `data/raw` and `data/evaluation`.
+- Stage 4 outputs (`aspect_sentiment_results.csv`, `review_checkpoints.csv`, and `extraction_failures.csv`) are produced by [scripts/run_batch_extraction.py](scripts/run_batch_extraction.py). The documented command `python scripts/run_batch_extraction.py --max-reviews 10` invokes Gemini for up to 10 reviews plus retries; it is not run by the dashboard. Follow Stage 4's bounded-run instructions before invoking it.
+- Stage 5 evaluation files are produced by `python scripts/prepare_evaluation_sample.py`, manual completion of `gold_annotations_template.csv`, and (only after explicit approval) `python scripts/run_evaluation_inference.py --confirm-live-calls`. The evaluator is `python scripts/evaluate_extraction.py`. See Stage 5 for the annotation protocol and API-call bound.
+- If result/checkpoint/evaluation files are absent, the dashboard still starts and identifies which views are unavailable. It does not fabricate metrics or automatically generate data.
+
+### Deployment and release notes
+
+Streamlit Community Cloud can run this app by selecting the repository and `app.py` as the entry point; `requirements.txt` installs Streamlit. The dashboard's repository-relative paths mean any non-tracked pipeline outputs or evaluation reports must be provisioned to those paths by the deployment environment before launch if populated charts are expected. This project does not implement remote artifact storage or a secure artifact download workflow. Do not add raw datasets, `.env`, secrets, checkpoints, predictions, or reports to a public repository just to populate a deployment. Without provisioned outputs, the app intentionally shows the current empty-state messages. No cloud deployment has been performed or verified.
+
+### Stage 6 verification and status
+
+Dashboard data tests use synthetic CSV/JSON fixtures and require no Gemini credentials. Final result: `python -m pytest tests/test_dashboard_data.py -q` → 10 passed; `python -m pytest -q` → 58 passed, 1 warning. The warning is the existing upstream Google GenAI/Python deprecation warning. Streamlit `1.65.0` was installed on Python `3.14.2`. Streamlit `AppTest` ran `app.py` with zero exceptions; headless server startup also succeeded, `/_stcore/health` returned `ok`, and `/` returned HTTP 200. This is not browser or cloud deployment testing. No screenshot was captured.
+
+Implemented and exercised: data validation/loading, missing/empty states, composed filters, aspect/sentiment aggregation, distinct review counts, missing evaluation handling, and headless app rendering. Not verified: populated dashboard with real Stage 4 results, metrics from completed human labels, browser interaction across devices, and any cloud deployment. Current repository state has no Stage 4 processed outputs and no Stage 5 report; all 50 gold rows remain unannotated, so no actual model evaluation metrics are available.
+
 ## Notes
 
 - The project did not contain an existing notebook or loader script when Stage 1 began.
