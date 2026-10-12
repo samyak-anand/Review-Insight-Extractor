@@ -16,8 +16,25 @@ This file is intentionally kept local and ignored by Git via .gitignore because 
 
 Expected storage requirement for the full source review file: roughly 130-140 MB for the current revision, with the sample CSV adding only a few hundred KB.
 
+## Stage 3: Gemini extraction integration
+
+The repository now includes a Pydantic schema, prompt builder, and extraction wrapper for Gemini structured output.
+
+Validated configuration:
+
+- Model in use: `MODEL_NAME=gemini-3.8-flash`
+- A minimal live call succeeded using the configured Gemini API key.
+- `python -m pytest -q` passed with 18 offline tests.
+- `python scripts/test_gemini_extraction.py` successfully processed 10 reviews from the prepared sample CSV without failures.
+
+Important runtime note:
+
+- Google retired `gemini-2.5-flash` for new users during validation, so this project uses the currently supported `gemini-3.8-flash` generation instead.
+- The extraction layer still validates all quotes against the original review text before accepting structured output.
+
 ## Notes
 
 - The project did not contain an existing notebook or loader script when Stage 1 began.
 - The dataset source was verified before downloading.
 - The sample CSV uses a fixed seed and a deterministic review identifier derived from original source fields; it is not a row-number substitute.
+- The live Gemini smoke test is intentionally limited to 10 reviews and is meant to validate the end-to-end path without processing the full 500-row sample in one shot.
