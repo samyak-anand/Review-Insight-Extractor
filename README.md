@@ -32,6 +32,95 @@ Important runtime note:
 - Google retired `gemini-2.5-flash` for new users during validation, so this project uses the currently supported `gemini-3.8-flash` generation instead.
 - The extraction layer still validates all quotes against the original review text before accepting structured output.
 
+## Stage 4: batch extraction pipeline
+
+The project now includes a resumable batch runner in [scripts/run_batch_extraction.py](scripts/run_batch_extraction.py). It reuses the existing extraction function, schema validation, and prompt logic from [src/extract.py](src/extract.py), [src/schema.py](src/schema.py), and [src/prompts.py](src/prompts.py), and it writes deterministic CSV outputs to [data/processed](data/processed).
+
+### Batch architecture
+
+- Input: [data/raw/all_beauty_sample_500.csv](data/raw/all_beauty_sample_500.csv)
+- Work product: [data/processed/aspect_sentiment_results.csv](data/processed/aspect_sentiment_results.csv)
+- Checkpoints: [data/processed/review_checkpoints.csv](data/processed/review_checkpoints.csv)
+- Failures: [data/processed/extraction_failures.csv](data/processed/extraction_failures.csv)
+
+The runner validates required columns, rejects blank or duplicate review IDs, skips empty review text, and only processes eligible rows. Each review is processed independently with bounded retries for transient errors. Successful outputs are written and checkpointed before the next review is attempted, and restart logic ignores already-completed reviews while allowing failed ones to be retried later.
+
+### Environment and model configuration
+
+The project expects a local environment file with the API key and model name. The working configuration is:
+
+- `GEMINI_API_KEY` set in the environment or in `.env`
+- `MODEL_NAME=gemini-3.8-flash`
+
+The Stage 3 model switch was required because the previous `gemini-2.5-flash` model name was no longer available for new users.
+
+### Commands
+
+Safe test run (default bounded path):
+
+`python scripts/run_batch_extraction.py --max-reviews 10`
+
+Full 500-review sample run only when explicitly requested:
+
+`python scripts/run_batch_extraction.py --all --max-reviews 500`
+
+To clear prior checkpoints before a new run:
+
+`python scripts/run_batch_extraction.py --all --reset`
+
+### Retry and error handling
+
+The pipeline classifies errors into retryable and permanent categories:
+
+- Retryable: rate limit, temporary server/network issues, timeouts, and transient 429/5xx-style responses.
+- Permanent: missing credentials, invalid model configuration, permission issues, schema/validation failures, and invalid quote mismatches.
+
+Retry behavior is bounded and exponential, with a sane maximum delay. A review is only counted as successful after the extraction passes schema validation and exact quote verification against the original review text. Zero-finding reviews are marked as completed rather than failed.
+
+### Checkpoint and restart behavior
+
+The checkpoint file records one row per review ID with status, attempt count, aspect count, and last error details. On restart, completed review IDs are skipped. Failed reviews are retried. Results are deduplicated by review ID, aspect, sentiment, and supporting quote to prevent duplicate aspect rows across restarts.
+
+A malformed checkpoint file causes a safe failure with a clear error message. The recommended restart path is to fix the underlying issue and rerun the same command without `--reset` unless you intentionally want a fresh state.
+
+### Output format and zero-aspect handling
+
+The results CSV contains one row per extracted aspect and keeps source identifiers attached to each row:
+
+- `review_id`
+- `asin`
+- `parent_asin`
+- `rating`
+- `timestamp`
+- `aspect`
+- `sentiment`
+- `supporting_quote`
+
+Reviews with zero extracted findings are still persisted as completed rows in the checkpoint file and produce zero rows in the results CSV.
+
+The failure log stores:
+
+- `review_id`
+- `attempt_count`
+- `error_category`
+- `error_summary`
+- `final_status`
+- `updated_at`
+
+### Actual verification completed
+
+The offline regression suite is passing for the project in its current state:
+
+- `python -m pytest -q` → 32 passed, 1 warning
+
+No full 500-review live Gemini batch was executed in this stage. The batch runner was verified in offline tests, and the live 10-review smoke test from Stage 3 was already completed earlier with a successful 10/10 result.
+
+### Current limitations and planned future work
+
+- The batch runner intentionally does not process the full 701,528-row dataset in this stage.
+- It avoids unnecessary concurrency and keeps API usage bounded.
+- It is designed for safe restartability and reproducible output, but it does not introduce dashboarding, evaluation pipelines, or Stage 5 analytics yet.
+
 ## Notes
 
 - The project did not contain an existing notebook or loader script when Stage 1 began.
