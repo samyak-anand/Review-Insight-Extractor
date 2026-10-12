@@ -121,6 +121,78 @@ No full 500-review live Gemini batch was executed in this stage. The batch runne
 - It avoids unnecessary concurrency and keeps API usage bounded.
 - It is designed for safe restartability and reproducible output, but it does not introduce dashboarding, evaluation pipelines, or Stage 5 analytics yet.
 
+## Stage 5: evaluation and error analysis
+
+Stage 5 adds an isolated evaluation workflow under [data/evaluation](data/evaluation). It does not change the Stage 1 sample, Stage 2 schema or prompt, Stage 3 extraction behavior, or Stage 4 production outputs. It does not start a dashboard.
+
+### Evaluation population and selected reviews
+
+The evaluation population is the existing 500-row [data/raw/all_beauty_sample_500.csv](data/raw/all_beauty_sample_500.csv). Before preparation, it was verified to contain 500 nonblank unique review IDs and 500 nonblank review texts. The selected set contains 50 unique reviews, chosen by pandas `DataFrame.sample(n=50, random_state=42)`; the selection is deterministic for the same input and pandas sampling behavior. The selection keeps `review_id`, rating, title, ASINs, timestamp, and exact source review text. It omits `user_id` and other unnecessary personal or auxiliary fields.
+
+Prepare the files without overwriting existing annotation work:
+
+`python scripts/prepare_evaluation_sample.py`
+
+This creates:
+
+- [data/evaluation/evaluation_reviews_50.csv](data/evaluation/evaluation_reviews_50.csv): selected source reviews for annotation.
+- [data/evaluation/gold_annotations_template.csv](data/evaluation/gold_annotations_template.csv): one initial `unannotated` row per selected review.
+
+The preparer refuses to overwrite either file unless `--overwrite` is supplied. The template contains no model-generated or pre-filled gold labels.
+
+### Human annotation instructions
+
+Use one CSV row per aspect finding. For each finding, fill `review_id`, set `annotation_status` to `annotated`, and provide a canonical `aspect`, a sentiment, and an exact `supporting_quote`. Add one row for each distinct aspect in a review. Copy the initial placeholder row for additional findings. Use `rationale` only for a brief human explanation.
+
+Every review must be explicitly resolved:
+
+- `annotated`: one or more finding rows; never leave the initial empty placeholder alongside completed findings.
+- `no_aspects`: exactly one row with aspect, sentiment, quote, and rationale blank. This is a valid zero-finding review, not a missing annotation.
+- `needs_adjudication`: exactly one blank finding row; excluded from quality metrics until resolved.
+- `unannotated`: leave the initial placeholder unchanged; excluded from quality metrics.
+
+Annotation conventions:
+
+- Use only the canonical aspect labels and the sentiments `positive`, `neutral`, or `negative` from Stage 2.
+- Annotate each distinct aspect once per review. Consolidate repeated mentions of the same aspect into one finding and choose a representative exact quote; do not duplicate an aspect just because it appears multiple times.
+- If evidence for one aspect is genuinely mixed and cannot reasonably be assigned one polarity, use `neutral`. If evidence is too ambiguous or insufficient to make a defensible label, use `needs_adjudication` for the review rather than inventing a label.
+- Use `Other` only for a meaningful, explicitly supported aspect that does not fit the defined taxonomy. It is not an uncertainty label.
+- Copy the quote exactly, preserving capitalization, whitespace, spelling, and punctuation. The quote must be a substring of the selected source review text.
+- Separate product opinions from service events: shipping time, transit, or arrival condition are `Delivery`; seller communication, refund, replacement, or support are `Customer service`. Product performance or product quality should not be inferred from a delivery complaint.
+
+### Prediction source and provenance
+
+No Stage 4 processed outputs were present when Stage 5 began, and no real predictions currently exist for these 50 review IDs. The Stage 3 model name is configured as `gemini-3.8-flash`, but model quality has not been measured. Gold labels have not been manually completed.
+
+Only after explicitly approving live calls, inference for this exact selected set can be run into a separate Stage 5 directory:
+
+`python scripts/run_evaluation_inference.py --confirm-live-calls`
+
+This command is not run as part of tests or sample preparation. It requires `--confirm-live-calls`, accepts at most 50 reviews and 3 retries per review, and therefore permits up to 200 Gemini calls in the worst case (50 reviews × 4 attempts). The actual number depends on transient failures. It writes into `data/evaluation/predictions/` and records the source text/ID fingerprint, the extraction/schema/prompt code fingerprint, model name, and run status in `prediction_manifest.json`. A temporary inference input supplies a blank `user_id` column solely for the Stage 4 loader contract; no user identifiers are copied into the evaluation files.
+
+The evaluator rejects predictions if the selected IDs or exact review text differ, the Stage 3 code fingerprint differs, the configured model name differs, the manifest is incomplete, or output IDs/labels/checkpoint counts are invalid. Existing Stage 4 outputs without provenance are not silently reused.
+
+### Metrics and matching rules
+
+After human annotations and provenance-matched predictions exist, run:
+
+`python scripts/evaluate_extraction.py`
+
+The evaluator writes [data/evaluation/reports/evaluation_report.json](data/evaluation/reports/evaluation_report.json) and [data/evaluation/reports/evaluation_errors.csv](data/evaluation/reports/evaluation_errors.csv).
+
+- **Aspect detection:** sets of `(review_id, canonical aspect)` are compared over only `annotated` and `no_aspects` reviews. Exact duplicate prediction rows collapse. Distinct prediction rows for the same review/aspect are rejected rather than selecting an arbitrary sentiment. Duplicate gold aspects are rejected. Micro precision, recall, and F1 report raw TP/FP/FN; per-aspect counts and scores use the same matching rule. Zero-aspect gold reviews contribute false positives for unsupported predictions; true negatives are not included. A score with a zero denominator is `null`, not a misleading zero.
+- **Sentiment:** calculated only for correctly matched review/aspect pairs. The denominator is the count of those pairs. Unmatched aspect sentiments cannot improve accuracy. The confusion matrix uses gold labels as rows and predicted labels as columns, with per-class scores on the same matched-pair subset.
+- **Quote validity:** exact-substring validity against the original source text, over unique prediction findings associated with completed gold annotations. Invalid quotes are counted separately and do not imply whether a human considers valid text to support the finding.
+- **Unannotated reviews:** predictions for `unannotated` or `needs_adjudication` reviews are explicitly excluded from quality metrics and counted in the report. Unknown IDs are rejected.
+- **Operational reliability:** selected, attempted, successful, failed, and unattempted reviews come from review checkpoints. Failure rate is failed / attempted. Completed reviews with checkpoint `aspect_count == 0` are counted as valid zero-finding completions; checkpoint aspect counts must match the normalized prediction rows.
+- **Error analysis:** the CSV contains review-level false positives, missed aspects, sentiment mismatches, invalid quotes, and extraction failures. It omits review excerpts and raw exception text to avoid unnecessary disclosure. Error category counts are summarized in the JSON report.
+
+### Stage 5 verification and status
+
+Offline tests use synthetic fixtures only and make no Gemini calls. Final verification completed: existing Stage 1–4 tests `32 passed, 1 warning`; Stage 5 tests `16 passed, 1 warning`; synthetic end-to-end fixture `1 passed, 1 warning`; full repository suite `48 passed, 1 warning`. The warning is an upstream Google GenAI/Python deprecation warning. These synthetic checks are not model performance metrics.
+
+Current status: 50 source reviews and an empty annotation template are prepared; all 50 labels remain unannotated; no corresponding real model predictions exist; no Gemini calls have been made for Stage 5. Therefore there are no actual model quality metrics to report. The 50-review sample is small, single-annotator agreement is not measured, and no claims about generalization or root causes are made. No Stage 6 dashboard work is included.
+
 ## Notes
 
 - The project did not contain an existing notebook or loader script when Stage 1 began.
