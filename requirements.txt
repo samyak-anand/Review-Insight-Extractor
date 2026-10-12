@@ -1,0 +1,5 @@
+numpy
+pandas
+pyarrow
+pydantic>=2.7,<3
+pytest

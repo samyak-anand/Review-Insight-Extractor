@@ -1,0 +1,6 @@
+# Local datasets
+/data/raw/*.parquet
+/data/raw/*.parquet.*
+
+# Optional: keep sample CSV tracked if desired; the full dataset is intentionally ignored.
+# data/raw/all_beauty_sample_500.csv
